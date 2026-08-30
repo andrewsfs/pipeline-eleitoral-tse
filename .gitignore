@@ -1,0 +1,11 @@
+# Ambientes Virtuais e Cache
+venv/
+__pycache__/
+
+# Variáveis de Ambiente (Segurança)
+.env
+
+# Dados Brutos e Processados (Evitar sobrecarga no GitHub)
+data/
+*.csv
+*.xlsx
