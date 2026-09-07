@@ -4,6 +4,8 @@ import glob
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import math
+import time
+import tracemalloc
 
 # 1. Configuração do Supabase
 load_dotenv()
@@ -121,6 +123,10 @@ def orquestrar_pipeline(ano):
         print(f"[{uf}] Pipeline finalizado com sucesso!")
 
 if __name__ == "__main__":
+    print("Iniciando monitoramento de hardware (Profiling)...")
+    tracemalloc.start()
+    tempo_inicio = time.time()
+    
     anos_para_processar = obter_anos_disponiveis()
     
     if not anos_para_processar:
@@ -134,3 +140,17 @@ if __name__ == "__main__":
             orquestrar_pipeline(ano)
             
         print("\n=== PIPELINE CONCLUÍDO COM SUCESSO ===")
+
+    # Captura as métricas finais
+    tempo_fim = time.time()
+    memoria_atual, memoria_pico = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    
+    # Conversão e cálculo
+    tempo_total = tempo_fim - tempo_inicio
+    pico_mb = memoria_pico / (1024 * 1024)
+    
+    print(f"\n=== RELATÓRIO DE PERFORMANCE ===")
+    print(f"Tempo total de execução: {tempo_total:.2f} segundos")
+    print(f"Pico máximo de RAM alocada: {pico_mb:.2f} MB")
+    print(f"================================")
