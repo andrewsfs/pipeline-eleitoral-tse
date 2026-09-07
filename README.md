@@ -1,50 +1,64 @@
-\# Pipeline ETL: Inteligência Territorial com Dados do TSE
+# Pipeline ETL - Geolocalização de Votos (TSE)
 
+Pipeline de ingestão de dados "Local-First" desenvolvido para processar, agregar e cruzar dados históricos de eleições do Tribunal Superior Eleitoral (TSE), enviando os resultados otimizados para um banco de dados relacional na nuvem (Supabase/PostgreSQL).
 
+## Arquitetura da Solução
 
-\## O Problema
+O processo minimiza o uso de memória RAM (Data Slicing) e evita reprocessamentos desnecessários através de um controle rigoroso de idempotência.
 
-Campanhas políticas frequentemente carecem de inteligência geográfica baseada em dados reais. Os dados públicos do Tribunal Superior Eleitoral (TSE) oferecem um raio-X detalhado das votações, mas são disponibilizados em arquivos brutos massivos (gigabytes de CSVs) com granularidade por seção eleitoral, dificultando a análise direta por aplicações web.
+```mermaid
+graph TD
+    A[Arquivos Locais TSE /data] -->|Leitura Dinâmica por Ciclo/UF| B(Pandas DataFrame)
+    B --> C{Filtro de Idempotência}
+    C -->|Já Processado| D[Ignora Arquivo]
+    C -->|Novo Arquivo| E[Inner Join: Votos x Locais]
+    E --> F[Agregação por Bairro e Coordenadas]
+    F --> G[Fatiamento em Lotes / Batch]
+    G -->|API REST - service_role| H[(Supabase: PostgreSQL)]
+    H --> I[Tabela: votos_consolidados]
+    H --> J[Tabela: etl_logs]
+```
 
+## Decisões Arquiteturais
 
+- **Local-First:** O cruzamento geográfico ocorre localmente, garantindo o controle total sobre a base nacional do TSE e evitando custos operacionais com APIs de nuvem para processamento bruto.
+- **Idempotência por Arquivo:** O pipeline consulta a tabela `etl_logs` no Supabase antes de iniciar o processamento de uma UF. Isso previne duplicidade e desperdício computacional.
+- **Batch Upload:** Inserção em lotes (2.000 registros por requisição) utilizando credencial `service_role` para contornar bloqueios de Row Level Security (RLS) e limites de payload HTTP.
+- **Otimização de Índices:** O banco de dados possui índices nas colunas `ano_eleicao`, `cargo`, `numero_candidato`, `sigla_uf` e `municipio` para garantir respostas em milissegundos no front-end.
 
-\## A Solução
+## Desempenho e Profiling
 
-Este projeto implementa um pipeline ETL local utilizando Python e Pandas para processar os microdados do TSE. A arquitetura foi desenhada para:
+Resultados obtidos em ambiente local durante o processamento do ciclo eleitoral de 2024 (Estado do Rio de Janeiro):
 
-1\. \*\*Extrair\*\* os dados brutos de votação e locais de seção.
+- **Volume de Saída:** ~958.000 registros geográficos agregados.
+- **Pico de RAM:** ~963 MB (Demonstrando a eficácia da agregação prévia).
+- **Tempo de Execução:** ~9,4 minutos (Incluindo tempo de rede para upload via API).
 
-2\. \*\*Transformar\*\* e cruzar (Join) essas informações, consolidando os votos em nível de bairro e coordenadas geográficas.
+## Estrutura de Diretórios
 
-3\. \*\*Carregar\*\* apenas o fragmento essencial (dados limpos e agregados) em um banco de dados relacional na nuvem (Supabase/PostgreSQL).
+```text
+pipeline_tse/
+├── data/
+│   ├── 2022/
+│   │   ├── eleitorado_local_votacao_2022.csv
+│   │   └── votacao_secao_2022_RJ.csv
+│   └── 2024/
+│       ├── eleitorado_local_votacao_2024.csv
+│       └── votacao_secao_2024_RJ.csv
+├── src/
+│   └── main.py
+├── .env
+├── .gitignore
+├── requirements.txt
+└── README.md
+```
 
+## Como Executar
 
-
-\*\*Trade-off Arquitetural:\*\* Optou-se por rodar o processamento pesado localmente e subir apenas os dados agregados para a nuvem. Isso reduz o volume de armazenamento no Supabase em mais de 90% e garante que a aplicação front-end (Mapa de Calor) consuma a API com respostas em milissegundos, reduzindo custos de infraestrutura.
-
-
-
-\## Tecnologias Utilizadas
-
-\* \*\*Python 3 \& Pandas:\*\* Processamento em lote e manipulação de DataFrames.
-
-\* \*\*Supabase (PostgreSQL):\*\* Banco de dados relacional em nuvem.
-
-\* \*\*Git/GitHub:\*\* Controle de versão e governança de código.
-
-
-
-\## Como Reproduzir Localmente
-
-1\. Clone este repositório.
-
-2\. Crie um ambiente virtual: `python -m venv venv`
-
-3\. Ative o ambiente e instale as dependências: `pip install -r requirements.txt`
-
-4\. Baixe os arquivos do TSE e coloque na pasta `/data`.
-
-5\. Crie um arquivo `.env` com suas credenciais do Supabase.
-
-6\. Execute o script principal: `python src/main.py`
-
+1. Instale as dependências: `pip install -r requirements.txt`
+2. Configure as variáveis de ambiente no arquivo `.env`:
+   ```env
+   SUPABASE_URL=sua_url
+   SUPABASE_KEY=sua_service_role_key
+   ```
+3. Execute o orquestrador: `python src/main.py`
