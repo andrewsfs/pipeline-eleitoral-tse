@@ -26,6 +26,21 @@ graph TD
 - **Batch Upload:** Inserção em lotes (2.000 registros por requisição) utilizando credencial `service_role` para contornar bloqueios de Row Level Security (RLS) e limites de payload HTTP.
 - **Otimização de Índices:** O banco de dados possui índices nas colunas `ano_eleicao`, `cargo`, `numero_candidato`, `sigla_uf` e `municipio` para garantir respostas em milissegundos no front-end.
 
+## Manutenção e Reprocessamento
+
+Como o pipeline utiliza **Idempotência por Arquivo**, os estados já processados são ignorados automaticamente. Caso seja necessário reprocessar um estado ou ano específico devido a correções nos dados de origem, execute os seguintes passos no banco de dados (Supabase) antes de rodar o script novamente:
+
+1. **Remova os dados consolidados do estado:**
+
+   ```sql
+   DELETE FROM votos_consolidados WHERE ano_eleicao = 2024 AND sigla_uf = 'RJ';
+   ```
+
+2. **Execute o pipeline novamente:**
+   ```bash
+   python pipeline/src/main.py
+   ```
+
 ## Desempenho e Profiling
 
 Resultados obtidos em ambiente local durante o processamento do ciclo eleitoral de 2024 (Estado do Rio de Janeiro):
