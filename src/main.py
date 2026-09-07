@@ -1,75 +1,110 @@
 import pandas as pd
 import os
 import glob
+from dotenv import load_dotenv
+from supabase import create_client, Client
+import math
+
+# 1. Configuração do Supabase
+load_dotenv()
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def estado_ja_processado(ano, uf):
+    """Consulta a tabela de logs no Supabase para garantir idempotência."""
+    resposta = supabase.table('etl_logs').select('id').eq('ano_eleicao', ano).eq('uf', uf).execute()
+    return len(resposta.data) > 0
+
+def registrar_log(ano, uf):
+    """Grava o registro de sucesso para evitar reprocessamento futuro."""
+    supabase.table('etl_logs').insert({'ano_eleicao': ano, 'uf': uf}).execute()
 
 def obter_estados_disponiveis(ano):
-    """Varre a pasta do ano especificado e identifica quais estados possuem arquivo de votos."""
+    """Varre a pasta local e lista as UFs disponíveis."""
     padrao_busca = f'data/{ano}/votacao_secao_{ano}_*.csv'
     arquivos = glob.glob(padrao_busca)
     
     estados = []
     for arquivo in arquivos:
-        # Extrai a sigla da UF do nome do arquivo (Ex: 'votacao_secao_2022_RJ.csv' -> 'RJ')
         nome_arquivo = os.path.basename(arquivo)
         uf = nome_arquivo.replace(f'votacao_secao_{ano}_', '').replace('.csv', '')
         estados.append(uf.upper())
-    
     return estados
 
 def processar_estado(ano, uf, df_locais_nacional):
-    """Processa o cruzamento de votos e endereços para um estado específico."""
-    print(f"\n--- Iniciando processamento para: {uf} ({ano}) ---")
+    """Cruza votos e locais, retornando o dataframe padronizado para o banco."""
+    print(f"\n[{uf}] Iniciando transformação de dados...")
     arquivo_votos = f'data/{ano}/votacao_secao_{ano}_{uf}.csv'
     
-    # 1. Filtra a base nacional de locais apenas para o estado atual
-    print(f"[{uf}] Isolando endereços do estado...")
     df_locais_uf = df_locais_nacional[df_locais_nacional['SG_UF'] == uf]
     
-    # 2. Carrega os votos do estado
-    print(f"[{uf}] Lendo arquivo de votos...")
     col_votos = ['NM_MUNICIPIO', 'NR_ZONA', 'NR_SECAO', 'DS_CARGO', 'NR_VOTAVEL', 'NM_VOTAVEL', 'QT_VOTOS']
     df_votos = pd.read_csv(arquivo_votos, sep=';', encoding='latin1', usecols=col_votos)
     
-    # 3. Cruzamento (Inner Join)
-    print(f"[{uf}] Cruzando votos com coordenadas territoriais...")
     df_final = pd.merge(df_votos, df_locais_uf, on=['NM_MUNICIPIO', 'NR_ZONA', 'NR_SECAO'], how='inner')
     
-    # 4. Agregação e redução de desperdício
-    print(f"[{uf}] Consolidando totais por bairro e candidato...")
     df_agrupado = df_final.groupby(
         ['DS_CARGO', 'NR_VOTAVEL', 'NM_VOTAVEL', 'NM_MUNICIPIO', 'NM_BAIRRO', 'NR_LATITUDE', 'NR_LONGITUDE'],
         as_index=False
     )['QT_VOTOS'].sum()
     
-    print(f"[{uf}] Concluído. {len(df_agrupado)} blocos gerados.")
+    # Prepara as colunas para bater exatamente com a estrutura do Supabase
+    df_agrupado = df_agrupado.rename(columns={
+        'DS_CARGO': 'cargo',
+        'NR_VOTAVEL': 'numero_candidato',
+        'NM_VOTAVEL': 'nome_candidato',
+        'NM_MUNICIPIO': 'municipio',
+        'NM_BAIRRO': 'bairro',
+        'NR_LATITUDE': 'latitude',
+        'NR_LONGITUDE': 'longitude',
+        'QT_VOTOS': 'total_votos'
+    })
+    df_agrupado['ano_eleicao'] = ano
+    df_agrupado['sigla_uf'] = uf
+    
+    # Converte NaN (Not a Number) do Pandas para None, compatível com inserção JSON/SQL
+    df_agrupado = df_agrupado.where(pd.notnull(df_agrupado), None)
+    
     return df_agrupado
 
-def orquestrar_pipeline(ano):
-    """Função principal que gerencia o fluxo de trabalho."""
-    estados = obter_estados_disponiveis(ano)
+def fazer_upload_em_lotes(df, tamanho_lote=2000):
+    """Fatia o dataframe em pequenos lotes e envia para a nuvem."""
+    registros = df.to_dict(orient='records')
+    total_lotes = math.ceil(len(registros) / tamanho_lote)
     
+    print(f"Iniciando upload para o Supabase: {len(registros)} registros em {total_lotes} lotes.")
+    
+    for i in range(0, len(registros), tamanho_lote):
+        lote = registros[i:i + tamanho_lote]
+        supabase.table('votos_consolidados').insert(lote).execute()
+        
+        # Feedback visual a cada 10 lotes para você acompanhar o progresso
+        if (i // tamanho_lote) % 10 == 0:
+            print(f" Progresso: Lote {i // tamanho_lote} de {total_lotes} enviado.")
+
+def orquestrar_pipeline(ano):
+    estados = obter_estados_disponiveis(ano)
     if not estados:
-        print(f"Nenhum arquivo de votos encontrado na pasta data/{ano}/.")
+        print(f"Nenhum arquivo de votos encontrado para {ano}.")
         return
         
-    print(f"Estados identificados para {ano}: {estados}")
-    
-    # Carrega a base nacional UMA VEZ para não sobrecarregar a leitura do disco
-    print(f"Carregando base nacional de locais de votação de {ano} na memória...")
+    print(f"Carregando base nacional de endereços de {ano}...")
     arquivo_locais = f'data/{ano}/eleitorado_local_votacao_{ano}.csv'
     col_locais = ['SG_UF', 'NM_MUNICIPIO', 'NR_ZONA', 'NR_SECAO', 'NM_BAIRRO', 'NR_LATITUDE', 'NR_LONGITUDE']
     df_locais_nacional = pd.read_csv(arquivo_locais, sep=';', encoding='latin1', usecols=col_locais)
     
     for uf in estados:
-        # [FUTURO] Ponto de injeção da regra de Idempotência:
-        # Aqui faremos a checagem no Supabase para pular o estado caso ele já tenha sido processado.
-        
+        # Trava de Idempotência
+        if estado_ja_processado(ano, uf):
+            print(f"[{uf}] IGNORADO: Estado já consta no log de processamento.")
+            continue
+            
         df_estado = processar_estado(ano, uf, df_locais_nacional)
+        fazer_upload_em_lotes(df_estado, tamanho_lote=2000)
+        registrar_log(ano, uf)
         
-        # Gera o CSV de validação local
-        nome_saida = f'resultado_{uf}_{ano}.csv'
-        df_estado.to_csv(nome_saida, index=False, sep=';', encoding='latin1')
-        print(f"[{uf}] Arquivo {nome_saida} salvo com sucesso.")
+        print(f"[{uf}] Pipeline finalizado com sucesso!")
 
 if __name__ == "__main__":
     orquestrar_pipeline(2022)
