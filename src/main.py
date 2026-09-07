@@ -11,6 +11,20 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+def obter_anos_disponiveis():
+    """Varre a pasta raiz de dados e identifica as subpastas correspondentes aos anos."""
+    if not os.path.exists('data'):
+        return []
+    
+    anos = []
+    for item in os.listdir('data'):
+        caminho_completo = os.path.join('data', item)
+        # Verifica se é uma pasta e se o nome contém apenas números (ex: '2022')
+        if os.path.isdir(caminho_completo) and item.isdigit():
+            anos.append(int(item))
+            
+    return sorted(anos) # Retorna em ordem cronológica
+
 def estado_ja_processado(ano, uf):
     """Consulta a tabela de logs no Supabase para garantir idempotência."""
     resposta = supabase.table('etl_logs').select('id').eq('ano_eleicao', ano).eq('uf', uf).execute()
@@ -107,4 +121,16 @@ def orquestrar_pipeline(ano):
         print(f"[{uf}] Pipeline finalizado com sucesso!")
 
 if __name__ == "__main__":
-    orquestrar_pipeline(2022)
+    anos_para_processar = obter_anos_disponiveis()
+    
+    if not anos_para_processar:
+        print("Nenhuma pasta de dados encontrada na raiz do projeto.")
+    else:
+        print(f"=== INICIANDO PIPELINE AUTOMATIZADO ===")
+        print(f"Anos identificados para varredura: {anos_para_processar}")
+        
+        for ano in anos_para_processar:
+            print(f"\n>>> Avaliando ciclo eleitoral de {ano} <<<")
+            orquestrar_pipeline(ano)
+            
+        print("\n=== PIPELINE CONCLUÍDO COM SUCESSO ===")
