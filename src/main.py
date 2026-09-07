@@ -1,51 +1,75 @@
-import basedosdados as bd
 import pandas as pd
 import os
-from dotenv import load_dotenv
+import glob
 
-def extrair_votos_nuvem():
-    load_dotenv()
-    project_id = os.environ.get("GCP_PROJECT_ID")
+def obter_estados_disponiveis(ano):
+    """Varre a pasta do ano especificado e identifica quais estados possuem arquivo de votos."""
+    padrao_busca = f'data/{ano}/votacao_secao_{ano}_*.csv'
+    arquivos = glob.glob(padrao_busca)
     
-    municipio_alvo = 'DUQUE DE CAXIAS'
-    ano_alvo = 2024
+    estados = []
+    for arquivo in arquivos:
+        # Extrai a sigla da UF do nome do arquivo (Ex: 'votacao_secao_2022_RJ.csv' -> 'RJ')
+        nome_arquivo = os.path.basename(arquivo)
+        uf = nome_arquivo.replace(f'votacao_secao_{ano}_', '').replace('.csv', '')
+        estados.append(uf.upper())
     
-    # A query SQL executa o Join no BigQuery e retorna apenas os dados agregados.
-    # Utilizamos o id_municipio da Base dos Dados (TSE) ou filtramos pelo nome para simplificar.
-    query = f"""
-        SELECT 
-            v.ano,
-            v.sigla_uf,
-            l.nome_municipio,
-            l.bairro,
-            v.cargo,
-            v.numero_candidato,
-            SUM(v.votos) as total_votos
-        FROM `basedosdados.br_tse_eleicoes.votacao_secao` AS v
-        INNER JOIN `basedosdados.br_tse_eleicoes.local_votacao` AS l
-            ON v.ano = l.ano 
-            AND v.sigla_uf = l.sigla_uf 
-            AND v.id_municipio_tse = l.id_municipio_tse 
-            AND v.zona = l.zona 
-            AND v.secao = l.secao
-        WHERE v.ano = {ano_alvo} 
-          AND v.sigla_uf = 'RJ' 
-          AND l.nome_municipio = '{municipio_alvo}'
-        GROUP BY 1, 2, 3, 4, 5, 6
-    """
+    return estados
+
+def processar_estado(ano, uf, df_locais_nacional):
+    """Processa o cruzamento de votos e endereços para um estado específico."""
+    print(f"\n--- Iniciando processamento para: {uf} ({ano}) ---")
+    arquivo_votos = f'data/{ano}/votacao_secao_{ano}_{uf}.csv'
     
-    print(f"Executando processamento em nuvem para {municipio_alvo} ({ano_alvo})...")
+    # 1. Filtra a base nacional de locais apenas para o estado atual
+    print(f"[{uf}] Isolando endereços do estado...")
+    df_locais_uf = df_locais_nacional[df_locais_nacional['SG_UF'] == uf]
     
-    # A primeira vez que este comando rodar, ele abrirá uma aba no navegador 
-    # pedindo para você fazer login com sua conta Google e autorizar o acesso.
-    df_consolidado = bd.read_sql(query, billing_project_id=project_id)
+    # 2. Carrega os votos do estado
+    print(f"[{uf}] Lendo arquivo de votos...")
+    col_votos = ['NM_MUNICIPIO', 'NR_ZONA', 'NR_SECAO', 'DS_CARGO', 'NR_VOTAVEL', 'NM_VOTAVEL', 'QT_VOTOS']
+    df_votos = pd.read_csv(arquivo_votos, sep=';', encoding='latin1', usecols=col_votos)
     
-    print(f"Processamento concluído. Total de registros: {len(df_consolidado)}")
+    # 3. Cruzamento (Inner Join)
+    print(f"[{uf}] Cruzando votos com coordenadas territoriais...")
+    df_final = pd.merge(df_votos, df_locais_uf, on=['NM_MUNICIPIO', 'NR_ZONA', 'NR_SECAO'], how='inner')
     
-    # Exibe as 5 primeiras linhas para conferência
-    print(df_consolidado.head())
+    # 4. Agregação e redução de desperdício
+    print(f"[{uf}] Consolidando totais por bairro e candidato...")
+    df_agrupado = df_final.groupby(
+        ['DS_CARGO', 'NR_VOTAVEL', 'NM_VOTAVEL', 'NM_MUNICIPIO', 'NM_BAIRRO', 'NR_LATITUDE', 'NR_LONGITUDE'],
+        as_index=False
+    )['QT_VOTOS'].sum()
     
-    return df_consolidado
+    print(f"[{uf}] Concluído. {len(df_agrupado)} blocos gerados.")
+    return df_agrupado
+
+def orquestrar_pipeline(ano):
+    """Função principal que gerencia o fluxo de trabalho."""
+    estados = obter_estados_disponiveis(ano)
+    
+    if not estados:
+        print(f"Nenhum arquivo de votos encontrado na pasta data/{ano}/.")
+        return
+        
+    print(f"Estados identificados para {ano}: {estados}")
+    
+    # Carrega a base nacional UMA VEZ para não sobrecarregar a leitura do disco
+    print(f"Carregando base nacional de locais de votação de {ano} na memória...")
+    arquivo_locais = f'data/{ano}/eleitorado_local_votacao_{ano}.csv'
+    col_locais = ['SG_UF', 'NM_MUNICIPIO', 'NR_ZONA', 'NR_SECAO', 'NM_BAIRRO', 'NR_LATITUDE', 'NR_LONGITUDE']
+    df_locais_nacional = pd.read_csv(arquivo_locais, sep=';', encoding='latin1', usecols=col_locais)
+    
+    for uf in estados:
+        # [FUTURO] Ponto de injeção da regra de Idempotência:
+        # Aqui faremos a checagem no Supabase para pular o estado caso ele já tenha sido processado.
+        
+        df_estado = processar_estado(ano, uf, df_locais_nacional)
+        
+        # Gera o CSV de validação local
+        nome_saida = f'resultado_{uf}_{ano}.csv'
+        df_estado.to_csv(nome_saida, index=False, sep=';', encoding='latin1')
+        print(f"[{uf}] Arquivo {nome_saida} salvo com sucesso.")
 
 if __name__ == "__main__":
-    df_final = extrair_votos_nuvem()
+    orquestrar_pipeline(2022)
